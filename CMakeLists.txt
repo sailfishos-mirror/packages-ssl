@@ -33,6 +33,10 @@ check_c_source_compiles(
      int main() { const void *key = kSecClass; return 0; }"
     HAVE_KSECCLASS)
 
+include(CheckSymbolExists)
+check_symbol_exists(ASN1_STRING_get0_data openssl/ssl.h
+		    HAVE_ASN1_STRING_get0_data)
+
 AC_CHECK_FUNCS(timegm)
 AC_CHECK_FUNCS(X509_check_host)
 AC_CHECK_FUNCS(i2d_re_X509_tbs)

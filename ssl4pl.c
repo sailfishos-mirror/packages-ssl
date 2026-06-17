@@ -767,25 +767,31 @@ unify_ec(term_t item, ECKEY *key)
   int rc;
   term_t privkey, pubkey;
 #ifdef USE_EVP_API
-  BIGNUM* priv_bn;
-  size_t publen;
-  size_t grouplen;
-  unsigned char* group;
-  EVP_PKEY_get_octet_string_param(key, "pub", NULL, 0, &publen);
+  BIGNUM* priv_bn = NULL;
+  size_t publen = 0;
+  char group[80];
+  if ( !EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+					NULL, 0, &publen) )
+    return raise_ssl_error(ERR_get_error());
   buf = OPENSSL_malloc(publen);
-  EVP_PKEY_get_octet_string_param(key, "pub", buf, publen, NULL);
-  EVP_PKEY_get_bn_param(key, "priv", &priv_bn);
-  EVP_PKEY_get_octet_string_param(key, "group", NULL, 0, &grouplen);
-  group = PL_malloc(grouplen);
-  EVP_PKEY_get_octet_string_param(key, "group", group, grouplen, NULL);
-
+  if ( !buf )
+    return raise_ssl_error(ERR_get_error());
+  if ( !EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+					buf, publen, NULL) ||
+       !EVP_PKEY_get_utf8_string_param(key, OSSL_PKEY_PARAM_GROUP_NAME,
+				       group, sizeof(group), NULL) )
+  { OPENSSL_free(buf);
+    return raise_ssl_error(ERR_get_error());
+  }
+  /* "priv" is absent for public-only keys; ignore failure here. */
+  EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn);
 #else
   int publen = i2o_ECPublicKey(key, &buf);
   const BIGNUM* priv_bn = EC_KEY_get0_private_key(key);
   const char* group = OBJ_nid2sn(EC_GROUP_get_curve_name(EC_KEY_get0_group(key)));
-#endif
   if ( publen < 0 )
     return raise_ssl_error(ERR_get_error());
+#endif
 
   rc = ( (pubkey = PL_new_term_ref()) &&
          (privkey = PL_new_term_ref()) &&
@@ -799,7 +805,7 @@ unify_ec(term_t item, ECKEY *key)
 
   OPENSSL_free(buf);
 #ifdef USE_EVP_API
-  PL_free(group);
+  BN_free(priv_bn);
 #endif
   return rc;
 }

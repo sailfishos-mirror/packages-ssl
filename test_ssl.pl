@@ -66,7 +66,8 @@ test_ssl :-
 		https_open,
 		ssl_certificates,
 		crypto_data_encrypt,
-		crypto_hash
+		crypto_hash,
+		crypto_ecdsa
 	      ]).
 :- dynamic
     option/1,                       % Options to test
@@ -800,6 +801,51 @@ test(null_hmac) :-
     assertion(Hash1 \== Hash2).
 
 :- end_tests(crypto_hash).
+
+
+		 /*******************************
+		 *           ECDSA              *
+		 *******************************/
+
+% Regression test for SWI-Prolog/packages-ssl#175: ecdsa_sign/4 and
+% ecdsa_verify/4 silently failed on OpenSSL 3 because the EC key was
+% reconstructed from a random EVP_PKEY whose private/public parameters
+% could not be mutated by EVP_PKEY_set_*_param().
+
+ec_private_key_pem(
+"-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIC0Xw6TUY4O+PYbIvVijRsigrzOcFg0fj2HUcybHa4R/oAoGCCqGSM49
+AwEHoUQDQgAEkN0MFyn7Dkfz9sV4rFmZ/4nu/Fp2U/Jrvs4LaWJrzSVGwC0DEmur
+1JPvGgBgMmY2Y0d0sTDHvFmjmdfxVe3PGw==
+-----END EC PRIVATE KEY-----
+").
+
+load_ec_private_key(private_key(EC)) :-
+    ec_private_key_pem(PEM),
+    setup_call_cleanup(
+        open_string(PEM, In),
+        load_private_key(In, '', private_key(EC)),
+        close(In)).
+
+:- begin_tests(crypto_ecdsa).
+
+test(load_key) :-
+    load_ec_private_key(private_key(ec(Priv, Pub, Curve))),
+    assertion(atom_length(Priv, 64)),                  % 32-byte priv as hex
+    assertion(atom_concat('04', _, Pub)),              % uncompressed point
+    assertion(Curve == prime256v1).
+
+test(sign_verify) :-
+    load_ec_private_key(private_key(ec(P,Q,C))),
+    ecdsa_sign(private_key(ec(P,Q,C)), hello, Sig, [encoding(text)]),
+    ecdsa_verify(public_key(ec(P,Q,C)), hello, Sig, [encoding(text)]).
+
+test(verify_rejects_tampered_data, [fail]) :-
+    load_ec_private_key(private_key(ec(P,Q,C))),
+    ecdsa_sign(private_key(ec(P,Q,C)), hello, Sig, [encoding(text)]),
+    ecdsa_verify(public_key(ec(P,Q,C)), goodbye, Sig, [encoding(text)]).
+
+:- end_tests(crypto_ecdsa).
 
 
 		 /*******************************

@@ -823,7 +823,59 @@ get_bn_arg(int a, term_t t, BIGNUM **bn)
 static int
 recover_ec(term_t t, ECKEY **rec)
 {
-  ECKEY *key;
+#ifdef USE_EVP_API
+  EVP_PKEY *key = NULL;
+  BIGNUM *privkey = NULL;
+  unsigned char *codes;
+  size_t codes_len;
+  term_t tcurve, pubkey;
+  char *curve;
+  OSSL_PARAM_BLD *bld = NULL;
+  OSSL_PARAM *params = NULL;
+  EVP_PKEY_CTX *ctx = NULL;
+  int selection;
+  int rc = FALSE;
+
+  if ( !((tcurve = PL_new_term_ref()) &&
+	 (pubkey = PL_new_term_ref()) &&
+	 PL_get_arg(3, t, tcurve) &&
+	 PL_get_chars(tcurve, &curve, CVT_ATOM|CVT_STRING|CVT_EXCEPTION) &&
+	 PL_get_arg(2, t, pubkey) &&
+	 PL_get_nchars(pubkey, &codes_len, (char **) &codes,
+		       CVT_ATOM|CVT_STRING|CVT_LIST|CVT_EXCEPTION) &&
+	 get_bn_arg(1, t, &privkey)) )
+    return FALSE;
+
+  if ( !(bld = OSSL_PARAM_BLD_new()) ||
+       !OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME,
+				       curve, 0) ||
+       !OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
+					codes, codes_len) ||
+       (privkey && !OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY,
+					   privkey)) ||
+       !(params = OSSL_PARAM_BLD_to_param(bld)) ||
+       !(ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL)) ||
+       EVP_PKEY_fromdata_init(ctx) <= 0 ||
+       EVP_PKEY_fromdata(ctx, &key,
+			 (selection = privkey ? EVP_PKEY_KEYPAIR
+					      : EVP_PKEY_PUBLIC_KEY),
+			 params) <= 0 )
+  { raise_ssl_error(ERR_get_error());
+    if ( key ) EVP_PKEY_free(key);
+    goto cleanup;
+  }
+
+  *rec = key;
+  rc = TRUE;
+
+cleanup:
+  if ( ctx ) EVP_PKEY_CTX_free(ctx);
+  if ( params ) OSSL_PARAM_free(params);
+  if ( bld ) OSSL_PARAM_BLD_free(bld);
+  BN_free(privkey);
+  return rc;
+#else
+  EC_KEY *key;
   BIGNUM *privkey = NULL;
   term_t pubkey;
   unsigned char *codes;
@@ -832,55 +884,31 @@ recover_ec(term_t t, ECKEY **rec)
   char *curve;
 
   if ( !(tcurve &&
-         PL_get_arg(3, t, tcurve) &&
-         PL_get_chars(tcurve, &curve, CVT_ATOM|CVT_STRING|CVT_EXCEPTION) &&
-#ifdef USE_EVP_API
-         (key = EVP_EC_gen(curve))
-#else
-         (key = EC_KEY_new_by_curve_name(OBJ_sn2nid(curve)))
-#endif
-     ) )
+	 PL_get_arg(3, t, tcurve) &&
+	 PL_get_chars(tcurve, &curve, CVT_ATOM|CVT_STRING|CVT_EXCEPTION) &&
+	 (key = EC_KEY_new_by_curve_name(OBJ_sn2nid(curve)))) )
     return FALSE;
 
   if ( !get_bn_arg(1, t, &privkey) )
-  {
-#ifdef USE_EVP_API
-    EVP_PKEY_free(key);
-#else
-    EC_KEY_free(key);
-#endif
+  { EC_KEY_free(key);
     return FALSE;
   }
 
   if ( privkey )
-  {
-#ifdef USE_EVP_API
-    EVP_PKEY_set_bn_param(key, "priv", privkey);
-#else
     EC_KEY_set_private_key(key, privkey);
-#endif
-  }
 
   if ( (pubkey=PL_new_term_ref()) &&
        PL_get_arg(2, t, pubkey) &&
        PL_get_nchars(pubkey, &codes_len, (char **) &codes,
-                     CVT_ATOM|CVT_STRING|CVT_LIST|CVT_EXCEPTION) &&
-#ifdef USE_EVP_API
-        EVP_PKEY_set_octet_string_param(key, "pub", (const unsigned char*) codes, codes_len)
-#else
-       (key = o2i_ECPublicKey(&key, (const unsigned char**) &codes, codes_len))
-#endif
-  )
+		     CVT_ATOM|CVT_STRING|CVT_LIST|CVT_EXCEPTION) &&
+       (key = o2i_ECPublicKey(&key, (const unsigned char**) &codes, codes_len)) )
   { *rec = key;
     return TRUE;
   }
 
-#ifdef USE_EVP_API
-  EVP_PKEY_free(key);
-#else
   EC_KEY_free(key);
-#endif
   return FALSE;
+#endif
 }
 #endif
 
@@ -1092,7 +1120,8 @@ pl_ecdsa_sign(term_t Private, term_t Data, term_t Enc, term_t Signature)
   unsigned char *signature = NULL;
   int rc;
 #ifdef USE_EVP_API
-  size_t signature_len;
+  size_t signature_len = 0;
+  EVP_PKEY_CTX *sign_ctx;
 #else
   ECDSA_SIG *sig;
   unsigned int signature_len;
@@ -1103,15 +1132,20 @@ pl_ecdsa_sign(term_t Private, term_t Data, term_t Enc, term_t Signature)
     return FALSE;
 
 #ifdef USE_EVP_API
-  signature_len = EVP_PKEY_get_size(key);
-  EVP_PKEY_CTX *sign_ctx = EVP_PKEY_CTX_new(key, NULL);
-  EVP_PKEY_sign_init(sign_ctx);
-  rc = EVP_PKEY_sign(sign_ctx,
-				 signature, &signature_len,
-				 data, (unsigned int)data_len);
-  EVP_PKEY_CTX_free(sign_ctx);
-  if (!rc)
+  if ( !(sign_ctx = EVP_PKEY_CTX_new(key, NULL)) ||
+       EVP_PKEY_sign_init(sign_ctx) <= 0 ||
+       EVP_PKEY_sign(sign_ctx, NULL, &signature_len,
+		     data, data_len) <= 0 ||
+       !(signature = OPENSSL_malloc(signature_len)) ||
+       EVP_PKEY_sign(sign_ctx, signature, &signature_len,
+		     data, data_len) <= 0 )
+  { if ( sign_ctx ) EVP_PKEY_CTX_free(sign_ctx);
+    EVP_PKEY_free(key);
+    OPENSSL_free(signature);
     return raise_ssl_error(ERR_get_error());
+  }
+  EVP_PKEY_CTX_free(sign_ctx);
+  EVP_PKEY_free(key);
 #else
   sig = ECDSA_do_sign(data, (unsigned int)data_len, key);
   EC_KEY_free(key);

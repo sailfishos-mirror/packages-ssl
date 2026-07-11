@@ -2193,31 +2193,20 @@ pl_crypto_curve_scalar_mult(term_t tcurve, term_t ts,
                 *******************************/
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-OpenSSL is only thread-safe as of version 1.1.0.
-
-For earlier versions, we need to install the hooks below. This code is
-based on mttest.c distributed with the OpenSSL library.
+OpenSSL is thread-safe as of version 1.1.0, so no per-thread hooks are
+required here.  The init/exit stubs are kept for symmetry with the SSL
+plugin.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
-
-#ifdef _REENTRANT
-
-#include <pthread.h>
 
 static int
 crypto_lib_init(void)
 { return TRUE;
 }
 
-#endif /*_REENTRANT*/
-
 
 static int
 crypto_lib_exit(void)
-/*
- * One-time library exit calls
- */
-{
-    return 0;
+{ return 0;
 }
 
 static foreign_t

@@ -1212,6 +1212,230 @@ pl_ecdsa_verify(term_t Public, term_t Data, term_t Enc, term_t Signature)
 
 
                  /*******************************
+                 *       ED25519 AND X25519     *
+                 *******************************/
+
+/* Ed25519 (RFC 8032) and X25519 (RFC 7748) use OpenSSL's _raw_ key API.
+   Keys, curve points and signatures are exchanged with Prolog as lists of
+   bytes; crypto.pl relates these to the hexadecimal representation using
+   hex_bytes/2.
+*/
+
+#if defined HAVE_EVP_PKEY_NEW_RAW_PRIVATE_KEY && \
+    defined HAVE_EVP_PKEY_NEW_RAW_PUBLIC_KEY && \
+    defined HAVE_EVP_PKEY_GET_RAW_PUBLIC_KEY
+#define HAVE_RAW_KEYS 1
+#endif
+
+#if defined HAVE_RAW_KEYS && defined HAVE_EVP_DIGESTSIGN && \
+    defined HAVE_EVP_DIGESTVERIFY && defined EVP_PKEY_ED25519
+#define HAVE_ED25519 1
+#endif
+
+#if defined HAVE_RAW_KEYS && defined EVP_PKEY_X25519
+#define HAVE_X25519 1
+#endif
+
+#define CURVE25519_KEY_LEN 32		/* keys and points */
+#define ED25519_SIG_LEN    64
+
+#ifdef HAVE_RAW_KEYS
+
+static int
+get_octets_ex(term_t t, size_t expected, unsigned char **data)
+{ size_t len;
+  char domain[32];
+
+  if ( !PL_get_nchars(t, &len, (char**)data,
+		      CVT_LIST|CVT_EXCEPTION|REP_ISO_LATIN_1) )
+    return FALSE;
+
+  if ( len != expected )
+  { Ssprintf(domain, "bytes(%zd)", expected);
+    return PL_domain_error(domain, t);
+  }
+
+  return TRUE;
+}
+
+
+/* Create an EVP_PKEY from a raw private or public key.  Returns NULL
+   after raising an exception.
+*/
+
+static EVP_PKEY *
+raw_key(int type, term_t Key, int private)
+{ unsigned char *key;
+  EVP_PKEY *pkey;
+
+  if ( !get_octets_ex(Key, CURVE25519_KEY_LEN, &key) )
+    return NULL;
+
+  pkey = private ? EVP_PKEY_new_raw_private_key(type, NULL, key,
+					        CURVE25519_KEY_LEN)
+                 : EVP_PKEY_new_raw_public_key(type, NULL, key,
+					       CURVE25519_KEY_LEN);
+  if ( !pkey )
+    raise_ssl_error(ERR_get_error());
+
+  return pkey;
+}
+
+#endif /*HAVE_RAW_KEYS*/
+
+
+static foreign_t
+pl_ed25519_seed_public_key(term_t Seed, term_t Public)
+{
+#ifdef HAVE_ED25519
+  EVP_PKEY *pkey;
+  unsigned char public[CURVE25519_KEY_LEN];
+  size_t public_len = sizeof(public);
+  int rc;
+
+  if ( !(pkey = raw_key(EVP_PKEY_ED25519, Seed, TRUE)) )
+    return FALSE;
+
+  rc = EVP_PKEY_get_raw_public_key(pkey, public, &public_len);
+  EVP_PKEY_free(pkey);
+  if ( !rc )
+    return raise_ssl_error(ERR_get_error());
+
+  return PL_unify_list_ncodes(Public, public_len, (char *)public);
+#else
+  return ssl_missing("ED25519");
+#endif
+}
+
+
+static foreign_t
+pl_ed25519_sign(term_t Seed, term_t Data, term_t Enc, term_t Signature)
+{
+#ifdef HAVE_ED25519
+  EVP_PKEY *pkey;
+  EVP_MD_CTX *ctx = NULL;
+  unsigned char *data;
+  size_t data_len;
+  unsigned char signature[ED25519_SIG_LEN];
+  size_t signature_len = sizeof(signature);
+
+  if ( !(pkey = raw_key(EVP_PKEY_ED25519, Seed, TRUE)) )
+    return FALSE;
+
+  if ( !get_enc_text(Data, Enc, &data_len, &data) )
+  { EVP_PKEY_free(pkey);
+    return FALSE;
+  }
+
+  /* Ed25519 requires the one-shot EVP_DigestSign() with a NULL digest */
+  if ( !(ctx = EVP_MD_CTX_new()) ||
+       EVP_DigestSignInit(ctx, NULL, NULL, NULL, pkey) <= 0 ||
+       EVP_DigestSign(ctx, signature, &signature_len, data, data_len) <= 0 )
+  { EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return raise_ssl_error(ERR_get_error());
+  }
+
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(pkey);
+
+  return PL_unify_list_ncodes(Signature, signature_len, (char *)signature);
+#else
+  return ssl_missing("ED25519");
+#endif
+}
+
+
+static foreign_t
+pl_ed25519_verify(term_t Public, term_t Data, term_t Enc, term_t Signature)
+{
+#ifdef HAVE_ED25519
+  EVP_PKEY *pkey;
+  EVP_MD_CTX *ctx = NULL;
+  unsigned char *data, *signature;
+  size_t data_len;
+  int rc;
+
+  if ( !(pkey = raw_key(EVP_PKEY_ED25519, Public, FALSE)) )
+    return FALSE;
+
+  if ( !get_enc_text(Data, Enc, &data_len, &data) ||
+       !get_octets_ex(Signature, ED25519_SIG_LEN, &signature) )
+  { EVP_PKEY_free(pkey);
+    return FALSE;
+  }
+
+  if ( !(ctx = EVP_MD_CTX_new()) ||
+       EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pkey) <= 0 )
+  { EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return raise_ssl_error(ERR_get_error());
+  }
+
+  rc = EVP_DigestVerify(ctx, signature, ED25519_SIG_LEN, data, data_len);
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(pkey);
+
+  if ( rc == 1 )
+    return TRUE;
+  if ( rc == 0 )			/* invalid signature */
+  { ERR_clear_error();
+    return FALSE;
+  }
+
+  return raise_ssl_error(ERR_get_error());
+#else
+  return ssl_missing("ED25519");
+#endif
+}
+
+
+static foreign_t
+pl_curve25519_scalar_mult(term_t Scalar, term_t Point, term_t Result)
+{
+#ifdef HAVE_X25519
+  EVP_PKEY *pkey, *peer = NULL;
+  EVP_PKEY_CTX *ctx = NULL;
+  unsigned char result[CURVE25519_KEY_LEN];
+  size_t result_len = sizeof(result);
+  int rc;
+
+  if ( !(pkey = raw_key(EVP_PKEY_X25519, Scalar, TRUE)) )
+    return FALSE;
+  if ( !(peer = raw_key(EVP_PKEY_X25519, Point, FALSE)) )
+  { EVP_PKEY_free(pkey);
+    return FALSE;
+  }
+
+  if ( !(ctx = EVP_PKEY_CTX_new(pkey, NULL)) ||
+       EVP_PKEY_derive_init(ctx) <= 0 ||
+       EVP_PKEY_derive_set_peer(ctx, peer) <= 0 )
+  { EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(peer);
+    EVP_PKEY_free(pkey);
+    return raise_ssl_error(ERR_get_error());
+  }
+
+  /* Fails if Point has small order, i.e., if the result is all zeroes */
+  rc = EVP_PKEY_derive(ctx, result, &result_len);
+  EVP_PKEY_CTX_free(ctx);
+  EVP_PKEY_free(peer);
+  EVP_PKEY_free(pkey);
+
+  if ( rc <= 0 )
+  { ERR_clear_error();
+    return FALSE;
+  }
+
+  return PL_unify_list_ncodes(Result, result_len, (char *)result);
+#else
+  return ssl_missing("X25519");
+#endif
+}
+
+
+
+                 /*******************************
                  *       RSA ENCRYPT/DECRYPT    *
                  *******************************/
 
@@ -2285,6 +2509,13 @@ install_crypto4pl(void)
 
   PL_register_foreign("_crypto_ecdsa_sign", 4, pl_ecdsa_sign, 0);
   PL_register_foreign("_crypto_ecdsa_verify", 4, pl_ecdsa_verify, 0);
+
+  PL_register_foreign("_crypto_ed25519_seed_public_key", 2,
+		      pl_ed25519_seed_public_key, 0);
+  PL_register_foreign("_crypto_ed25519_sign", 4, pl_ed25519_sign, 0);
+  PL_register_foreign("_crypto_ed25519_verify", 4, pl_ed25519_verify, 0);
+  PL_register_foreign("_crypto_curve25519_scalar_mult", 3,
+		      pl_curve25519_scalar_mult, 0);
 
   PL_register_foreign("rsa_private_decrypt", 4, pl_rsa_private_decrypt, 0);
   PL_register_foreign("rsa_private_encrypt", 4, pl_rsa_private_encrypt, 0);

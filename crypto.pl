@@ -583,12 +583,15 @@ ed25519_keypair_public_key(KeyPair, PublicKey) :-
 %   Options:
 %
 %     - encoding(+Encoding)
-%     Encoding to use for Data.  Default is `hex`, as with
-%     ecdsa_sign/4.  Alternatives are `octet`, `utf8` and `text`.
+%     Encoding to use for Data.  Default is `utf8`.  Alternatives are
+%     `octet`, `text` and `hex`.  Note that this differs from
+%     ecdsa_sign/4 and rsa_sign/4, which default to `hex` because they
+%     are typically applied to a _hash_ of the data.  Ed25519 signs the
+%     data itself.
 
 ed25519_sign(KeyPair, Data0, Signature, Options) :-
     keypair_private_key(KeyPair, Seed),
-    option(encoding(Enc0), Options, hex),
+    option(encoding(Enc0), Options, utf8),
     hex_encoding(Enc0, Data0, Enc, Data),
     '_crypto_ed25519_sign'(Seed, Data, Enc, Bytes),
     hex_bytes(Signature, Bytes).
@@ -602,7 +605,7 @@ ed25519_sign(KeyPair, Data0, Signature, Options) :-
 
 ed25519_verify(Key, Data0, Signature0, Options) :-
     public_key_bytes(Key, PublicKey),
-    option(encoding(Enc0), Options, hex),
+    option(encoding(Enc0), Options, utf8),
     hex_encoding(Enc0, Data0, Enc, Data),
     key_bytes(Signature0, 64, Signature),
     '_crypto_ed25519_verify'(PublicKey, Data, Enc, Signature).

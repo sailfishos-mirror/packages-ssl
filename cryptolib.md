@@ -161,6 +161,9 @@ that is birationally equivalent to Curve25519. A key _pair_ is derived
 from 32 arbitrary bytes and is represented in PKCS#8 v2 format (RFC
 8410), the format also used by ``openssl genpkey -algorithm ed25519``.
 
+Unlike ECDSA and RSA above, Ed25519 signs the data itself rather than a
+hash of it. The default encoding of Data is therefore `utf8`.
+
   * [[ed25519_new_keypair/1]]
   * [[ed25519_seed_keypair/2]]
   * [[ed25519_keypair_public_key/2]]

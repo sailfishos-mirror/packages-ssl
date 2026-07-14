@@ -908,10 +908,10 @@ test(rfc8032_public_key, [forall(ed25519_vector(_, Seed, PublicKey, _, _))]) :-
 
 test(rfc8032_sign, [forall(ed25519_vector(_, Seed, _, Message, Signature))]) :-
     ed25519_seed_keypair(Seed, KeyPair),
-    ed25519_sign(KeyPair, Message, Signature, []).
+    ed25519_sign(KeyPair, Message, Signature, [encoding(hex)]).
 
 test(rfc8032_verify, [forall(ed25519_vector(_, _, PublicKey, Message, Signature))]) :-
-    ed25519_verify(PublicKey, Message, Signature, []).
+    ed25519_verify(PublicKey, Message, Signature, [encoding(hex)]).
 
 test(seed_bytes_and_hex_agree) :-
     hex_bytes('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60',
@@ -924,14 +924,14 @@ test(seed_bytes_and_hex_agree) :-
 test(new_keypair_sign_verify) :-
     ed25519_new_keypair(KeyPair),
     ed25519_keypair_public_key(KeyPair, PublicKey),
-    ed25519_sign(KeyPair, hello, Signature, [encoding(text)]),
-    ed25519_verify(PublicKey, hello, Signature, [encoding(text)]).
+    ed25519_sign(KeyPair, hello, Signature, []),      % default is utf8
+    ed25519_verify(PublicKey, hello, Signature, []).
 
 test(verify_rejects_tampered_data, [fail]) :-
     ed25519_new_keypair(KeyPair),
     ed25519_keypair_public_key(KeyPair, PublicKey),
-    ed25519_sign(KeyPair, hello, Signature, [encoding(text)]),
-    ed25519_verify(PublicKey, goodbye, Signature, [encoding(text)]).
+    ed25519_sign(KeyPair, hello, Signature, []),
+    ed25519_verify(PublicKey, goodbye, Signature, []).
 
 test(bad_seed_length, [error(domain_error(bytes(32), _))]) :-
     ed25519_seed_keypair('501ace', _).
@@ -946,8 +946,8 @@ test(load_pem_key) :-
 test(sign_verify_pem_key) :-
     load_ed25519_private_key(PrivateKey),
     load_ed25519_public_key(PublicKey),
-    ed25519_sign(PrivateKey, hello, Signature, [encoding(text)]),
-    ed25519_verify(PublicKey, hello, Signature, [encoding(text)]).
+    ed25519_sign(PrivateKey, hello, Signature, []),
+    ed25519_verify(PublicKey, hello, Signature, []).
 
 :- end_tests(crypto_ed25519).
 

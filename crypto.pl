@@ -544,7 +544,7 @@ ed25519_new_keypair(KeyPair) :-
 %
 %   KeyPair  is  a  hexadecimal  atom  denoting  the  key  pair  in
 %   PKCS#8 v2 format (RFC 5958, RFC 8410), the format also used by
-%   `openssl genpkey -algorithm ed25519`.  It contains the private key
+%   ``openssl genpkey -algorithm ed25519``.  It contains the private key
 %   and must be kept absolutely secret.  It can be used for signing
 %   with ed25519_sign/4, and its public key is obtained with
 %   ed25519_keypair_public_key/2.

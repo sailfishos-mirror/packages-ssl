@@ -67,7 +67,9 @@ test_ssl :-
 		ssl_certificates,
 		crypto_data_encrypt,
 		crypto_hash,
-		crypto_ecdsa
+		crypto_ecdsa,
+		crypto_ed25519,
+		crypto_curve25519
 	      ]).
 :- dynamic
     option/1,                       % Options to test
@@ -846,6 +848,160 @@ test(verify_rejects_tampered_data, [fail]) :-
     ecdsa_verify(public_key(ec(P,Q,C)), goodbye, Sig, [encoding(text)]).
 
 :- end_tests(crypto_ecdsa).
+
+
+		 /*******************************
+		 *      ED25519 AND X25519      *
+		 *******************************/
+
+% Ed25519 key created using `openssl genpkey -algorithm ed25519`
+
+ed25519_private_key_pem(
+"-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIJ3GLkOJhOcNM7eh/kOebTp2zt/uCLO9ZAzQaCA4BPvl
+-----END PRIVATE KEY-----
+").
+
+ed25519_public_key_pem(
+"-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEATA3/1KLyOLpHPKJv8Srmj/1O7O6URL9b6CgSQt/X24E=
+-----END PUBLIC KEY-----
+").
+
+load_ed25519_private_key(Key) :-
+    ed25519_private_key_pem(PEM),
+    setup_call_cleanup(
+        open_string(PEM, In),
+        load_private_key(In, '', Key),
+        close(In)).
+
+load_ed25519_public_key(Key) :-
+    ed25519_public_key_pem(PEM),
+    setup_call_cleanup(
+        open_string(PEM, In),
+        load_public_key(In, Key),
+        close(In)).
+
+:- begin_tests(crypto_ed25519).
+
+% Test vectors from RFC 8032, section 7.1
+
+ed25519_vector(1,
+               '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60',
+               'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
+               '',
+               'e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b').
+ed25519_vector(2,
+               '4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb',
+               '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c',
+               '72',
+               '92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00').
+ed25519_vector(3,
+               'c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7',
+               'fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025',
+               'af82',
+               '6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a').
+
+test(rfc8032_public_key, [forall(ed25519_vector(_, Seed, PublicKey, _, _))]) :-
+    ed25519_seed_keypair(Seed, KeyPair),
+    ed25519_keypair_public_key(KeyPair, PublicKey).
+
+test(rfc8032_sign, [forall(ed25519_vector(_, Seed, _, Message, Signature))]) :-
+    ed25519_seed_keypair(Seed, KeyPair),
+    ed25519_sign(KeyPair, Message, Signature, []).
+
+test(rfc8032_verify, [forall(ed25519_vector(_, _, PublicKey, Message, Signature))]) :-
+    ed25519_verify(PublicKey, Message, Signature, []).
+
+test(seed_bytes_and_hex_agree) :-
+    hex_bytes('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60',
+              Seed),
+    ed25519_seed_keypair(Seed, KeyPair),
+    ed25519_keypair_public_key(KeyPair, PublicKey),
+    assertion(PublicKey ==
+              'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a').
+
+test(new_keypair_sign_verify) :-
+    ed25519_new_keypair(KeyPair),
+    ed25519_keypair_public_key(KeyPair, PublicKey),
+    ed25519_sign(KeyPair, hello, Signature, [encoding(text)]),
+    ed25519_verify(PublicKey, hello, Signature, [encoding(text)]).
+
+test(verify_rejects_tampered_data, [fail]) :-
+    ed25519_new_keypair(KeyPair),
+    ed25519_keypair_public_key(KeyPair, PublicKey),
+    ed25519_sign(KeyPair, hello, Signature, [encoding(text)]),
+    ed25519_verify(PublicKey, goodbye, Signature, [encoding(text)]).
+
+test(bad_seed_length, [error(domain_error(bytes(32), _))]) :-
+    ed25519_seed_keypair('501ace', _).
+
+test(load_pem_key) :-
+    load_ed25519_private_key(private_key(ed25519(KeyPair))),
+    load_ed25519_public_key(public_key(ed25519(Public))),
+    ed25519_keypair_public_key(KeyPair, Derived),
+    hex_bytes(Derived, Bytes),                 % the key pair embeds the
+    hex_bytes(Public, Bytes).                  % public key of the PEM file
+
+test(sign_verify_pem_key) :-
+    load_ed25519_private_key(PrivateKey),
+    load_ed25519_public_key(PublicKey),
+    ed25519_sign(PrivateKey, hello, Signature, [encoding(text)]),
+    ed25519_verify(PublicKey, hello, Signature, [encoding(text)]).
+
+:- end_tests(crypto_ed25519).
+
+:- begin_tests(crypto_curve25519).
+
+% Test vectors from RFC 7748, section 6.1
+
+alice_private('77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a').
+alice_public( '8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a').
+bob_private(  '5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb').
+bob_public(   'de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f').
+shared_secret('4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742').
+
+test(generator) :-
+    curve25519_generator(Generator),
+    assertion(Generator ==
+              '0900000000000000000000000000000000000000000000000000000000000000').
+
+test(rfc7748_public_keys) :-
+    curve25519_generator(Generator),
+    alice_private(APriv), alice_public(APub),
+    bob_private(BPriv), bob_public(BPub),
+    curve25519_scalar_mult(APriv, Generator, APub),
+    curve25519_scalar_mult(BPriv, Generator, BPub).
+
+test(rfc7748_shared_secret) :-
+    alice_private(APriv), alice_public(APub),
+    bob_private(BPriv), bob_public(BPub),
+    shared_secret(Shared),
+    curve25519_scalar_mult(APriv, BPub, Shared),
+    curve25519_scalar_mult(BPriv, APub, Shared).
+
+test(scalar_as_integer) :-
+    alice_private(APriv),
+    hex_bytes(APriv, Bytes),
+    little_endian_integer(Bytes, 0, Integer),
+    curve25519_generator(Generator),
+    curve25519_scalar_mult(Integer, Generator, Public),
+    alice_public(Public).
+
+little_endian_integer([], _, 0).
+little_endian_integer([B|Bs], Shift0, Integer) :-
+    Shift is Shift0+8,
+    little_endian_integer(Bs, Shift, Integer0),
+    Integer is Integer0 + (B<<Shift0).
+
+test(small_order_point_fails, [fail]) :-
+    % A point of small order yields the all-zero shared secret
+    curve25519_scalar_mult(
+        '77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a',
+        '0000000000000000000000000000000000000000000000000000000000000000',
+        _).
+
+:- end_tests(crypto_curve25519).
 
 
 		 /*******************************

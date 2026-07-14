@@ -137,6 +137,8 @@ static functor_t FUNCTOR_public_key1;
 static functor_t FUNCTOR_private_key1;
 static functor_t FUNCTOR_rsa8;
 static functor_t FUNCTOR_ec3;
+static functor_t FUNCTOR_ed255191;
+static functor_t FUNCTOR_x255191;
 static functor_t FUNCTOR_key1;
 static functor_t FUNCTOR_hash1;
 static functor_t FUNCTOR_next_update1;
@@ -812,6 +814,107 @@ unify_ec(term_t item, ECKEY *key)
 #endif
 
 
+#if defined HAVE_EVP_PKEY_GET_RAW_PRIVATE_KEY && \
+    defined HAVE_EVP_PKEY_GET_RAW_PUBLIC_KEY
+#define HAVE_RAW_KEYS 1
+#endif
+
+#if defined HAVE_RAW_KEYS && defined EVP_PKEY_ED25519
+#define HAVE_ED25519 1
+#endif
+#if defined HAVE_RAW_KEYS && defined EVP_PKEY_X25519
+#define HAVE_X25519 1
+#endif
+
+#ifdef HAVE_RAW_KEYS
+
+#define CURVE25519_KEY_LEN 32
+
+static int
+unify_hex_key(term_t item, functor_t functor,
+	      size_t len, const unsigned char *data)
+{ term_t hex;
+
+  return ( (hex=PL_new_term_ref()) &&
+	   unify_bytes_hex(hex, len, data) &&
+	   PL_unify_term(item, PL_FUNCTOR, functor, PL_TERM, hex) );
+}
+
+
+static int
+unify_raw_public_key(term_t item, EVP_PKEY *key, functor_t functor)
+{ unsigned char public[CURVE25519_KEY_LEN];
+  size_t public_len = sizeof(public);
+
+  if ( !EVP_PKEY_get_raw_public_key(key, public, &public_len) )
+    return raise_ssl_error(ERR_get_error());
+
+  return unify_hex_key(item, functor, public_len, public);
+}
+
+#endif /*HAVE_RAW_KEYS*/
+
+#ifdef HAVE_ED25519
+
+/* An Ed25519 private key is unified as the PKCS#8 v2 (RFC 5958, RFC 8410)
+   key pair that is also created by ed25519_new_keypair/1 of library(crypto)
+   and thus can be used for signing with ed25519_sign/4.
+*/
+
+static int
+unify_ed25519(term_t item, EVP_PKEY *key)
+{ static const unsigned char header[] =
+    { 0x30,81,			/* SEQUENCE of 81 bytes */
+      2,1,1,			/* INTEGER 1: version v2, public key included */
+      0x30,5,			/* privateKeyAlgorithm: SEQUENCE of 5 bytes */
+      6,3,43,101,112,		/* OBJECT IDENTIFIER 1.3.101.112 (Ed25519) */
+      4,34,4,32			/* privateKey: OCTET STRING of OCTET STRING */
+    };
+  unsigned char pair[16+CURVE25519_KEY_LEN+3+CURVE25519_KEY_LEN];
+  unsigned char *seed   = &pair[sizeof(header)];
+  unsigned char *public = &pair[sizeof(header)+CURVE25519_KEY_LEN+3];
+  size_t seed_len = CURVE25519_KEY_LEN, public_len = CURVE25519_KEY_LEN;
+
+  if ( !EVP_PKEY_get_raw_private_key(key, seed, &seed_len) )
+  { ERR_clear_error();			/* we only have the public key */
+    return unify_raw_public_key(item, key, FUNCTOR_ed255191);
+  }
+
+  if ( !EVP_PKEY_get_raw_public_key(key, public, &public_len) )
+    return raise_ssl_error(ERR_get_error());
+
+  memcpy(pair, header, sizeof(header));
+  pair[sizeof(header)+CURVE25519_KEY_LEN+0] = 0x81; /* [1] IMPLICIT BIT STRING */
+  pair[sizeof(header)+CURVE25519_KEY_LEN+1] = 33;   /* of 33 bytes */
+  pair[sizeof(header)+CURVE25519_KEY_LEN+2] = 0;    /* 0 unused bits */
+
+  return unify_hex_key(item, FUNCTOR_ed255191, sizeof(pair), pair);
+}
+
+#endif /*HAVE_ED25519*/
+
+#ifdef HAVE_X25519
+
+/* X25519 keys and points are unified as 32 bytes, the representation used
+   by curve25519_scalar_mult/3 of library(crypto).
+*/
+
+static int
+unify_x25519(term_t item, EVP_PKEY *key)
+{ unsigned char private[CURVE25519_KEY_LEN];
+  size_t private_len = sizeof(private);
+
+  if ( !EVP_PKEY_get_raw_private_key(key, private, &private_len) )
+  { ERR_clear_error();			/* we only have the public key */
+    return unify_raw_public_key(item, key, FUNCTOR_x255191);
+  }
+
+  return unify_hex_key(item, FUNCTOR_x255191, private_len, private);
+}
+
+#endif /*HAVE_X25519*/
+
+
 static int
 unify_key(EVP_PKEY* key, functor_t type, term_t item)
 { if ( type )
@@ -854,6 +957,14 @@ unify_key(EVP_PKEY* key, functor_t type, term_t item)
       return rc;
     }
 #endif
+#endif
+#ifdef HAVE_ED25519
+    case EVP_PKEY_ED25519:
+    return unify_ed25519(item, key);
+#endif
+#ifdef HAVE_X25519
+    case EVP_PKEY_X25519:
+    return unify_x25519(item, key);
 #endif
 #ifndef OPENSSL_NO_DH
     case EVP_PKEY_DH:
@@ -4295,6 +4406,8 @@ install_ssl4pl(void)
   FUNCTOR_private_key1      = PL_new_functor(PL_new_atom("private_key"), 1);
   FUNCTOR_rsa8              = PL_new_functor(PL_new_atom("rsa"), 8);
   FUNCTOR_ec3               = PL_new_functor(PL_new_atom("ec"), 3);
+  FUNCTOR_ed255191          = PL_new_functor(PL_new_atom("ed25519"), 1);
+  FUNCTOR_x255191           = PL_new_functor(PL_new_atom("x25519"), 1);
   FUNCTOR_hash1             = PL_new_functor(PL_new_atom("hash"), 1);
   FUNCTOR_next_update1      = PL_new_functor(PL_new_atom("next_update"), 1);
   FUNCTOR_signature1        = PL_new_functor(PL_new_atom("signature"), 1);

@@ -525,21 +525,29 @@ ssl_set_options(SSL0, SSL, Options) :-
 %   using Password to decrypt the key  if it is encrypted. Note that
 %   the  password  is  currently   only  supported  for  PEM  files.
 %   DER-encoded keys which are password protected will not load. The
-%   key must be an RSA or EC key. DH and DSA keys are not supported,
-%   and PrivateKey will  be bound to an atom (dh_key  or dsa_key) if
-%   you  try and  load such  a  key.  Otherwise  PrivateKey will  be
-%   unified with private_key(KeyTerm) where KeyTerm is an rsa/8 term
-%   representing an RSA key, or ec/3 for EC keys.
+%   key must be  an RSA, EC, Ed25519 or  X25519 key.  DH and  DSA keys
+%   are not supported, and PrivateKey will be bound to an atom (dh_key
+%   or  dsa_key)  if  you try  and  load  such  a key.  Otherwise
+%   PrivateKey will be unified with private_key(KeyTerm), where
+%   KeyTerm is one of:
+%
+%     - rsa/8 for RSA keys
+%     - ec/3 for EC keys
+%     - ed25519/1 holding the hexadecimal key _pair_ in PKCS#8 v2
+%       format, suitable for ed25519_sign/4
+%     - x25519/1 holding the hexadecimal scalar, suitable for
+%       curve25519_scalar_mult/3
 
 %!  load_public_key(+Stream, -PublicKey) is det.
 %
 %   Load  a  public key  PublicKey  from  the given  stream  Stream.
 %   Supports loading both DER- and PEM-encoded keys. The key must be
-%   an  RSA or  EC  key. DH  and  DSA keys  are  not supported,  and
-%   PublicKey will  be bound to an  atom (dh_key or dsa_key)  if you
-%   try and  load such  a key. Otherwise  PublicKey will  be unified
-%   with  public_key(KeyTerm)   where  KeyTerm  is  an   rsa/8  term
-%   representing an RSA key, or ec/3 for EC keys.
+%   an RSA, EC, Ed25519 or X25519 key.  DH and DSA keys are not
+%   supported, and PublicKey will be bound to an atom (dh_key or
+%   dsa_key) if you try and load such a key.  Otherwise PublicKey
+%   will be unified with public_key(KeyTerm), where KeyTerm is an
+%   rsa/8 or ec/3 term as with load_private_key/3, or ed25519/1 or
+%   x25519/1 holding the hexadecimal public key.
 
 
 %!  cert_accept_any(+SSL,

@@ -90,16 +90,8 @@ typedef int BOOL;
 
 static atom_t ATOM_server;
 static atom_t ATOM_client;
-static atom_t ATOM_password;
 static atom_t ATOM_host;
 static atom_t ATOM_peer_cert;
-static atom_t ATOM_cacerts;
-static atom_t ATOM_require_crl;
-static atom_t ATOM_crl;
-static atom_t ATOM_certificate_file;
-static atom_t ATOM_certificate_key_pairs;
-static atom_t ATOM_key_file;
-static atom_t ATOM_pem_password_hook;
 static atom_t ATOM_cert_verify_hook;
 static atom_t ATOM_close_parent;
 static atom_t ATOM_close_notify;
@@ -410,15 +402,6 @@ get_bool_arg(int a, term_t t, int *i)
 
   _PL_get_arg(a, t, t2);
   return PL_get_bool_ex(t2, i);
-}
-
-
-static int
-get_file_arg(int a, term_t t, char **f)
-{ term_t t2 = PL_new_term_ref();
-
-  _PL_get_arg(a, t, t2);
-  return PL_get_file_name(t2, f, PL_FILE_EXIST);
 }
 
 
@@ -3707,20 +3690,90 @@ get_cacerts(term_t CATail, cacert_stack **stackp)
 }
 
 
+static int
+get_crls(term_t list, STACK_OF(X509_CRL) **crlp)
+{ STACK_OF(X509_CRL) *crls = sk_X509_CRL_new_null();
+  term_t list_head = PL_new_term_ref();
+  term_t list_tail = PL_copy_term_ref(list);
+
+  while( PL_get_list(list_tail, list_head, list_tail) )
+  { atom_t crl_name;
+    X509_CRL *crl;
+    if (PL_is_atom(list_head) && PL_get_atom(list_head, &crl_name))
+    { FILE *file = fopen(PL_atom_chars(crl_name), "rb");
+      if ( file )
+      { crl = PEM_read_X509_CRL(file, NULL, NULL, NULL);
+        sk_X509_CRL_push(crls, crl);
+      } else
+        return PL_existence_error("file", list_head);
+    }
+  }
+
+  *crlp = crls;
+  return TRUE;
+}
+
+
+static int
+get_cert_key_pairs(term_t list, PL_SSL *conf, term_t options)
+{ term_t cert_head = PL_new_term_ref();
+  term_t cert_tail = PL_copy_term_ref(list);
+
+  while( PL_get_list(cert_tail, cert_head, cert_tail) )
+  { atom_t name;
+    size_t arity;
+    char *certificate, *key;
+    int idx = conf->num_cert_key_pairs;
+
+    if ( idx >= SSL_MAX_CERT_KEY_PAIRS )
+      return PL_domain_error("fewer_certificates", options);
+
+    ssl_deb(4, "loading certificate/key pair with index %d\n", idx);
+
+    if ( !PL_get_name_arity(cert_head, &name, &arity) ||
+         name != ATOM_minus ||
+         arity != 2 )
+      return PL_type_error("pair", cert_head);
+
+    if ( !get_char_arg(1, cert_head, &certificate) )
+      return FALSE;
+    if ( !get_char_arg(2, cert_head, &key) )
+      return FALSE;
+
+    conf->cert_key_pairs[idx].certificate = ssl_strdup(certificate);
+    conf->cert_key_pairs[idx].key         = ssl_strdup(key);
+    conf->num_cert_key_pairs++;
+  }
+
+  return PL_get_nil_ex(cert_tail);
+}
+
+
+static PL_option_t context_options[] =
+{ PL_OPTION("password",		     OPT_STRING),
+  PL_OPTION("require_crl",	     OPT_BOOL),
+  PL_OPTION("crl",		     OPT_TERM),
+  PL_OPTION("certificate_file",	     OPT_TERM),
+  PL_OPTION("cacerts",		     OPT_TERM),
+  PL_OPTION("certificate_key_pairs", OPT_TERM),
+  PL_OPTION("key_file",		     OPT_TERM),
+  PL_OPTION("pem_password_hook",     OPT_TERM),
+  PL_OPTIONS_END
+};
 
 static foreign_t
 pl_ssl_context(term_t role, term_t config, term_t options, term_t method)
 { atom_t a;
   PL_SSL *conf;
   int r;
-  term_t tail;
-  term_t head = PL_new_term_ref();
   module_t module = NULL;
   const SSL_METHOD *ssl_method;
+  char *password = NULL;
+  term_t crl_t = 0, certfile_t = 0, cacerts_t = 0, ckp_t = 0;
+  term_t keyfile_t = 0, pem_hook_t = 0;
 
   if ( !PL_strip_module(options, &module, options) )
     return FALSE;
-  tail = PL_copy_term_ref(options);
 
   if ( !PL_get_atom_ex(role, &a) )
     return FALSE;
@@ -3737,116 +3790,50 @@ pl_ssl_context(term_t role, term_t config, term_t options, term_t method)
   if ( !(conf = ssl_init(r, ssl_method)) )
     return PL_resource_error("memory");
 
-  while( PL_get_list(tail, head, tail) )
-  { atom_t name;
-    size_t arity;
+  if ( !PL_scan_options(options, OPT_UNKNOWN_IGNORE, "ssl_option",
+			context_options,
+			&password, &conf->crl_required, &crl_t, &certfile_t,
+			&cacerts_t, &ckp_t, &keyfile_t, &pem_hook_t) )
+    return FALSE;
 
-    if ( !(PL_get_name_arity(head, &name, &arity) && arity == 1) )
-      return PL_type_error("ssl_option", head);
+  if ( password )
+    set_string(conf, password, password);
+  if ( crl_t )
+  { STACK_OF(X509_CRL) *crls = NULL;
 
-    if ( name == ATOM_password )
-    { char *s;
+    if ( !get_crls(crl_t, &crls) )
+      return FALSE;
+    if ( conf->crl_list )
+      sk_X509_CRL_pop_free(conf->crl_list, X509_CRL_free);
+    conf->crl_list = crls;
+  }
+  if ( certfile_t )
+  { char *file;
 
-      if ( !get_char_arg(1, head, &s) )
-	return FALSE;
+    if ( !PL_get_file_name(certfile_t, &file, PL_FILE_EXIST) )
+      return FALSE;
+    set_string(conf, certificate_file, file);
+  }
+  if ( cacerts_t )
+  { cacert_stack *stack;
 
-      set_string(conf, password, s);
-    } else if ( name == ATOM_require_crl )
-    { int val;
+    if ( !get_cacerts(cacerts_t, &stack) )
+      return FALSE;
+    free_cacert_stack(conf->cacerts);
+    conf->cacerts = stack;
+  }
+  if ( ckp_t && !get_cert_key_pairs(ckp_t, conf, options) )
+    return FALSE;
+  if ( keyfile_t )
+  { char *file;
 
-      if ( !get_bool_arg(1, head, &val) )
-	return FALSE;
-
-      conf->crl_required = val;
-    } else if ( name == ATOM_crl )
-    { STACK_OF(X509_CRL) *crls = sk_X509_CRL_new_null();
-      term_t list_head = PL_new_term_ref();
-      term_t list_tail = PL_new_term_ref();
-
-      _PL_get_arg(1, head, list_tail);
-      while( PL_get_list(list_tail, list_head, list_tail) )
-      { atom_t crl_name;
-        X509_CRL *crl;
-        if (PL_is_atom(list_head) && PL_get_atom(list_head, &crl_name))
-        { FILE *file = fopen(PL_atom_chars(crl_name), "rb");
-          if ( file )
-          { crl = PEM_read_X509_CRL(file, NULL, NULL, NULL);
-            sk_X509_CRL_push(crls, crl);
-          } else
-            return PL_existence_error("file", list_head);
-        }
-      }
-      if (conf->crl_list)
-        sk_X509_CRL_pop_free(conf->crl_list, X509_CRL_free);
-      conf->crl_list = crls;
-    } else if ( name == ATOM_certificate_file )
-    { char *file;
-
-      if ( !get_file_arg(1, head, &file) )
-	return FALSE;
-
-      set_string(conf, certificate_file, file);
-    } else if ( name == ATOM_cacerts )
-    { term_t arg = PL_new_term_ref();
-      cacert_stack *stack;
-
-      _PL_get_arg(1, head, arg);
-      if ( get_cacerts(arg, &stack) )
-      { free_cacert_stack(conf->cacerts);
-	conf->cacerts = stack;
-      } else
-	return FALSE;
-    } else if ( name == ATOM_certificate_file )
-    { char *file;
-
-      if ( !get_file_arg(1, head, &file) )
-	return FALSE;
-
-      set_string(conf, certificate_file, file);
-    } else if ( name == ATOM_certificate_key_pairs )
-    { term_t cert_head = PL_new_term_ref();
-      term_t cert_tail = PL_new_term_ref();
-      _PL_get_arg(1, head, cert_tail);
-      while( PL_get_list(cert_tail, cert_head, cert_tail) )
-      { atom_t name;
-        char *certificate, *key;
-        int idx = conf->num_cert_key_pairs;
-
-        if ( idx >= SSL_MAX_CERT_KEY_PAIRS )
-          return PL_domain_error("fewer_certificates", options);
-
-        ssl_deb(4, "loading certificate/key pair with index %d\n", idx);
-
-        if ( !PL_get_name_arity(cert_head, &name, &arity) ||
-             name != ATOM_minus ||
-             arity != 2 )
-          return PL_type_error("pair", cert_head);
-
-        if ( !get_char_arg(1, cert_head, &certificate) )
-          return FALSE;
-        if ( !get_char_arg(2, cert_head, &key) )
-          return FALSE;
-
-        conf->cert_key_pairs[idx].certificate = ssl_strdup(certificate);
-        conf->cert_key_pairs[idx].key         = ssl_strdup(key);
-        conf->num_cert_key_pairs++;
-      }
-      if ( !PL_get_nil_ex(cert_tail) )
-        return FALSE;
-    } else if ( name == ATOM_key_file )
-    { char *file;
-
-      if ( !get_file_arg(1, head, &file) )
-	return FALSE;
-
-      set_string(conf, key_file, file);
-    } else if ( name == ATOM_pem_password_hook )
-    { term_t cb = PL_new_term_ref();
-      _PL_get_arg(1, head, cb);
-      conf->cb_pem_passwd.goal   = PL_record(cb);
-      conf->cb_pem_passwd.module = module;
-    } else
-      continue;
+    if ( !PL_get_file_name(keyfile_t, &file, PL_FILE_EXIST) )
+      return FALSE;
+    set_string(conf, key_file, file);
+  }
+  if ( pem_hook_t )
+  { conf->cb_pem_passwd.goal   = PL_record(pem_hook_t);
+    conf->cb_pem_passwd.module = module;
   }
 
   if ( !parse_malleable_options(conf, module, options) )
@@ -4360,14 +4347,8 @@ install_t
 install_ssl4pl(void)
 { MKATOM(server);
   MKATOM(client);
-  MKATOM(password);
   MKATOM(host);
   MKATOM(peer_cert);
-  MKATOM(cacerts);
-  MKATOM(certificate_file);
-  MKATOM(certificate_key_pairs);
-  MKATOM(key_file);
-  MKATOM(pem_password_hook);
   MKATOM(cert_verify_hook);
   MKATOM(close_parent);
   MKATOM(close_notify);
@@ -4385,8 +4366,6 @@ install_ssl4pl(void)
   MKATOM(tlsv1_1);
   MKATOM(tlsv1_2);
   MKATOM(tlsv1_3);
-  MKATOM(require_crl);
-  MKATOM(crl);
   MKATOM(alpn_protocols);
   MKATOM(alpn_protocol_hook);
 

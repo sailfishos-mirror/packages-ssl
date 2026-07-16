@@ -80,11 +80,6 @@ static atom_t ATOM_pkcs1;
 static atom_t ATOM_pkcs1_oaep;
 static atom_t ATOM_none;
 static atom_t ATOM_block;
-static atom_t ATOM_algorithm;
-static atom_t ATOM_hmac;
-static atom_t ATOM_close_parent;
-static atom_t ATOM_encoding;
-static atom_t ATOM_padding;
 
 static functor_t FUNCTOR_public_key1;
 static functor_t FUNCTOR_private_key1;
@@ -310,59 +305,51 @@ get_text_representation(term_t t, int *rep)
 }
 
 
+static PL_option_t hash_options_spec[] =
+{ PL_OPTION("algorithm",    OPT_TERM),
+  PL_OPTION("hmac",         OPT_TERM),
+  PL_OPTION("close_parent", OPT_BOOL),
+  PL_OPTION("encoding",     OPT_TERM),
+  PL_OPTIONS_END
+};
+
 static int
 hash_options(term_t options, PL_CRYPTO_HASH_CONTEXT *result)
-{ term_t opts = PL_copy_term_ref(options);
-  term_t opt = PL_new_term_ref();
+{ term_t algorithm = 0, hmac = 0, encoding = 0;
 
   /* defaults */
   result->encoding = REP_UTF8;
   result->algorithm = EVP_sha256();
 
-  while(PL_get_list(opts, opt, opts))
-  { atom_t aname;
-    size_t arity;
-
-    if ( PL_get_name_arity(opt, &aname, &arity) && arity == 1 )
-    { term_t a = PL_new_term_ref();
-
-      _PL_get_arg(1, opt, a);
-
-      if ( aname == ATOM_algorithm )
-      { atom_t a_algorithm;
-
-        if ( !PL_get_atom_ex(a, &a_algorithm) )
-          return FALSE;
-
-        if ( !get_hash_algorithm(a_algorithm, &result->algorithm) )
-          return PL_domain_error("algorithm", a);
-      } else if ( aname == ATOM_hmac )
-      { size_t key_len;
-        char *key;
-
-        if ( !PL_get_nchars(a, &key_len, &key,
-			    CVT_ATOM|CVT_STRING|CVT_LIST|
-			    CVT_EXCEPTION|BUF_MALLOC) )
-          return FALSE;
-        result->mac_key = key;
-	result->mac_key_len = key_len;
-      } else if ( aname == ATOM_close_parent )
-      { if ( !PL_get_bool_ex(a, &result->close_parent) )
-          return FALSE;
-      } else if ( aname == ATOM_encoding )
-      {  int rep;
-         if ( !get_text_representation(a, &rep) )
-           return PL_domain_error("encoding", a);
-
-         result->encoding = ( rep == REP_UTF8 ) ? REP_UTF8 : REP_ISO_LATIN_1;
-      }
-    } else
-    { return PL_type_error("option", opt);
-    }
-  }
-
-  if ( !PL_get_nil_ex(opts) )
+  if ( !PL_scan_options(options, 0, "hash_option", hash_options_spec,
+			&algorithm, &hmac, &result->close_parent, &encoding) )
     return FALSE;
+
+  if ( algorithm )
+  { atom_t a_algorithm;
+
+    if ( !PL_get_atom_ex(algorithm, &a_algorithm) )
+      return FALSE;
+    if ( !get_hash_algorithm(a_algorithm, &result->algorithm) )
+      return PL_domain_error("algorithm", algorithm);
+  }
+  if ( hmac )
+  { size_t key_len;
+    char *key;
+
+    if ( !PL_get_nchars(hmac, &key_len, &key,
+			CVT_ATOM|CVT_STRING|CVT_LIST|CVT_EXCEPTION|BUF_MALLOC) )
+      return FALSE;
+    result->mac_key = key;
+    result->mac_key_len = key_len;
+  }
+  if ( encoding )
+  { int rep;
+
+    if ( !get_text_representation(encoding, &rep) )
+      return PL_domain_error("encoding", encoding);
+    result->encoding = ( rep == REP_UTF8 ) ? REP_UTF8 : REP_ISO_LATIN_1;
+  }
 
   return TRUE;
 }
@@ -1067,6 +1054,12 @@ get_enc_text(term_t text, term_t enc, size_t *len, unsigned char **data)
 }
 
 
+static PL_option_t crypt_options[] =
+{ PL_OPTION("encoding", OPT_TERM),
+  PL_OPTION("padding",  OPT_TERM),
+  PL_OPTIONS_END
+};
+
 static int
 parse_options(term_t options_t, crypt_mode_t mode, int* rep, int* padding)
 { if (PL_is_atom(options_t)) /* Is really an encoding */
@@ -1075,28 +1068,14 @@ parse_options(term_t options_t, crypt_mode_t mode, int* rep, int* padding)
     else if ( !get_text_representation(options_t, rep) )
       return FALSE;
   } else
-  { term_t tail = PL_copy_term_ref(options_t);
-    term_t head = PL_new_term_ref();
+  { term_t encoding = 0, pad = 0;
 
-    while( PL_get_list_ex(tail, head, tail) )
-    { atom_t name;
-      size_t arity;
-      term_t arg = PL_new_term_ref();
-
-      if ( !PL_get_name_arity(head, &name, &arity) ||
-           arity != 1 ||
-           !PL_get_arg(1, head, arg) )
-        return PL_type_error("option", head);
-
-      if ( name == ATOM_encoding )
-      { if ( !get_text_representation(arg, rep) )
-          return FALSE;
-      } else if ( name == ATOM_padding && padding != NULL)
-      { if ( !get_padding(arg, mode, padding) )
-        return FALSE;
-      }
-    }
-    if ( !PL_get_nil_ex(tail) )
+    if ( !PL_scan_options(options_t, 0, "crypt_option", crypt_options,
+			  &encoding, &pad) )
+      return FALSE;
+    if ( encoding && !get_text_representation(encoding, rep) )
+      return FALSE;
+    if ( pad && padding != NULL && !get_padding(pad, mode, padding) )
       return FALSE;
   }
 
@@ -2478,11 +2457,6 @@ install_crypto4pl(void)
   MKATOM(pkcs1_oaep);
   MKATOM(none);
   MKATOM(block);
-  MKATOM(encoding);
-  MKATOM(algorithm);
-  MKATOM(hmac);
-  MKATOM(close_parent);
-  MKATOM(padding);
 
   FUNCTOR_public_key1       = PL_new_functor(PL_new_atom("public_key"), 1);
   FUNCTOR_private_key1      = PL_new_functor(PL_new_atom("private_key"), 1);

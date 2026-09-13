@@ -63,19 +63,26 @@ endif()
 
 
 if(NOT DEFINED SYSTEM_CACERT_FILENAME)
-  set(CERT_CANDIDATES
-      /data/data/com.termux/files/usr/etc/tls/cert.pem
-      /etc/ssl/certs/ca-certificates.crt
-      /etc/pki/tls/certs/ca-bundle.crt
-      /etc/ssl/ca-bundle.pem
-      /etc/ssl/cert.pem)
+  if(APPLE)
+    # Do not probe: the probe runs on the build host, while the only
+    # trusted certificate file on macOS is /etc/ssl/cert.pem.  If it is
+    # not there we fall back to the keychain at runtime.
+    set(SYSTEM_CACERT_FILENAME /etc/ssl/cert.pem)
+  else()
+    set(CERT_CANDIDATES
+	/data/data/com.termux/files/usr/etc/tls/cert.pem
+	/etc/ssl/certs/ca-certificates.crt
+	/etc/pki/tls/certs/ca-bundle.crt
+	/etc/ssl/ca-bundle.pem
+	/etc/ssl/cert.pem)
 
-  set(SYSTEM_CACERT_FILENAME /etc/ssl/certs/ca-certificates.crt)
-  foreach(f ${CERT_CANDIDATES})
-    if(EXISTS ${f})
-      set(SYSTEM_CACERT_FILENAME ${f})
-    endif()
-  endforeach()
+    set(SYSTEM_CACERT_FILENAME /etc/ssl/certs/ca-certificates.crt)
+    foreach(f ${CERT_CANDIDATES})
+      if(EXISTS ${f})
+	set(SYSTEM_CACERT_FILENAME ${f})
+      endif()
+    endforeach()
+  endif()
   set(SYSTEM_CACERT_FILENAME ${SYSTEM_CACERT_FILENAME}
       CACHE STRING
       "Location of the system TLS root certificate file")

@@ -503,21 +503,37 @@ ssl_set_options(SSL0, SSL, Options) :-
 %
 %       - On Windows, CertOpenSystemStore() is used to import
 %         the `"ROOT"` certificates from the OS.
-%       - On MacOSX, the trusted keys are loaded from the
-%         _SystemRootCertificates_ key chain.  The Apple API
-%         for this requires the SSL interface to be compiled
-%         with an XCode compiler, i.e., *not* with native gcc.
-%       - Otherwise, certificates are loaded from a file defined
-%         by the Prolog flag `system_cacert_filename`.  The initial
-%         value of this flag is operating system dependent.  For
-%         security reasons, the flag can only be set prior to using
-%         the SSL library.  For example:
+%       - On Unix and macOS, certificates are loaded from a file
+%         defined by the Prolog flag `system_cacert_filename`.  The
+%         initial value of this flag is established at build time and
+%         is =|/etc/ssl/cert.pem|= on macOS.  For security reasons, the
+%         flag can only be set prior to using the SSL library.  For
+%         example:
 %
 %           ==
 %           :- use_module(library(ssl)).
 %           :- set_prolog_flag(system_cacert_filename,
 %                              '/home/jan/ssl/ca-bundle.crt').
 %           ==
+%
+%       - On macOS the flag may be set to `keychain`, in which case
+%         the trust anchors are obtained from the keychain using
+%         SecTrustCopyAnchorCertificates().  This is also used as
+%         fallback if the file above does not exist or holds no
+%         certificates.  It is not the default because this API talks
+%         to the `securityd` daemon over Mach IPC, which can block
+%         indefinitely if the keychain is not accessible, e.g., in an
+%         ssh session while the login keychain is locked.  Such a
+%         block cannot be interrupted using e.g.
+%         call_with_time_limit/2.
+%
+%   Note that a PEM file is a plain list of certificates.  Unlike the
+%   keychain it cannot express trust settings made by the user or the
+%   administrator, e.g., root certificates that have been distrusted.
+%
+%   If no certificates can be obtained at all a warning is printed and
+%   List is unified with `[]`, which makes all certificate
+%   verification fail.
 
 %!  load_private_key(+Stream, +Password, -PrivateKey) is det.
 %
@@ -644,11 +660,31 @@ ssl_secure_ciphers(Cs) :-
                  *******************************/
 
 :- multifile
+    prolog:message//1,
     prolog:error_message//1,
     prolog:deprecated//1.
 
 prolog:error_message(ssl_error(ID, _Library, Function, Reason)) -->
     [ 'SSL(~w) ~w: ~w'-[ID, Function, Reason] ].
+
+prolog:message(ssl_cacerts(no_certificates, File)) -->
+    [ 'SSL: no system root certificates loaded from ~w.'-[File], nl,
+      'SSL: certificate verification will fail.  See the Prolog flag'-[], nl,
+      'SSL: system_cacert_filename.'-[]
+    ].
+prolog:message(ssl_cacerts(keychain_fallback, File)) -->
+    [ 'SSL: no system root certificates in ~w.'-[File], nl,
+      'SSL: falling back to the keychain.'-[]
+    ].
+prolog:message(ssl_cacerts(no_anchors, _)) -->
+    [ 'SSL: failed to copy the trust anchors from the keychain.'-[], nl,
+      'SSL: certificate verification will fail.'-[]
+    ].
+prolog:message(ssl_cacerts(no_keychain, _)) -->
+    [ 'SSL: the Prolog flag system_cacert_filename is set to `keychain\','-[],
+      nl,
+      'SSL: which is only supported on macOS.'-[]
+    ].
 prolog:deprecated(ssl_option(cacert_file(CACertFile))) -->
     [ 'SSL: cacert_file(~q) has need deprecated.'-[CACertFile],
       'Please use the option cacerts(List) instead'

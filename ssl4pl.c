@@ -71,6 +71,9 @@
 #ifndef SYSTEM_CACERT_FILENAME
 #define SYSTEM_CACERT_FILENAME "/etc/ssl/certs/ca-certificates.crt"
 #endif
+			/* Value of system_cacert_filename that asks for */
+			/* the macOS keychain rather than a PEM file */
+#define CACERT_KEYCHAIN "keychain"
 
 #define SSL_MAX_CERT_KEY_PAIRS 12
 
@@ -88,6 +91,7 @@ typedef int BOOL;
 #define FALSE 0
 #endif
 
+static atom_t ATOM_warning;
 static atom_t ATOM_server;
 static atom_t ATOM_client;
 static atom_t ATOM_host;
@@ -2549,7 +2553,7 @@ ssl_init(PL_SSL_ROLE role, const SSL_METHOD *ssl_method)
 }
 
 
-#if !defined(__WINDOWS__) && !defined(HAVE_SECURITY_SECURITY_H)
+#if !defined(__WINDOWS__)
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 Extract   the   system   certificate   file   from   the   Prolog   flag
 system_cacert_filename
@@ -2563,9 +2567,9 @@ system_cacert_filename(void)
   if ( !cacert_filename )
   { if ( (fid = PL_open_foreign_frame()) )
     { term_t av = PL_new_term_refs(2);
-      PL_put_atom_chars(av+0, "system_cacert_filename");
 
-      if ( PL_call_predicate(NULL, PL_Q_NORMAL,
+      if ( PL_put_atom_chars(av+0, "system_cacert_filename") &&
+           PL_call_predicate(NULL, PL_Q_NORMAL,
                              PL_predicate("current_prolog_flag", 2, "system"),
                              av) )
       { char *s;
@@ -2583,7 +2587,157 @@ system_cacert_filename(void)
 
   return cacert_filename;
 }
+
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Complain about the system root certificates.  Failing  to load these is
+not an error: we simply end up with an empty  set of trusted certificates
+and every connection fails with a rather  cryptic message from OpenSSL.
+Id identifies the message (see prolog:message//1 in ssl.pl) and Culprit
+is the file we tried to read or `keychain`.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+static bool
+ssl_cacerts_warning(const char *id, const char *culprit)
+{ return PL_print_message(ATOM_warning,
+			  PL_FUNCTOR_CHARS, "ssl_cacerts", 2,
+			    PL_CHARS, id,
+			    PL_CHARS, culprit);
+}
+
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Load PEM encoded certificates from filename  and  add  these  to  the
+system_certs stack.  Returns the number of certificates added or -1 if
+the file cannot be opened.  *ok is set to FALSE on resource errors.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+static int
+load_system_cacerts_file(const char *filename,
+                         STACK_OF(X509) *system_certs, bool *ok)
+{ X509 *cert;
+  FILE *cafile;
+  int count = 0;
+
+  if ( !filename || !*filename )
+    return -1;
+  if ( !(cafile=fopen(filename, "rb")) )
+    return -1;
+
+  ssl_deb(1, "cacert_filename = %s\n", filename);
+
+  while( (cert=PEM_read_X509(cafile, NULL, NULL, NULL)) )
+  { if ( sk_X509_push(system_certs, cert) )
+    { count++;
+    } else
+    { X509_free(cert);
+      *ok = PL_resource_error("memory");
+      break;
+    }
+  }
+  ERR_clear_error();		/* the loop ends on PEM_R_NO_START_LINE */
+  fclose(cafile);
+
+  return count;
+}
+
+
+#ifdef HAVE_SECURITY_SECURITY_H
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Load the trust anchors using the macOS  Security framework.  Returns the
+number of certificates added or -1 if the anchors cannot be copied.
+
+Note that SecTrustCopyAnchorCertificates() talks to  securityd and may
+block indefinitely if the keychain cannot be  accessed,  e.g., from an
+ssh session while the login keychain is  locked.   As the call is made
+from a Mach IPC it cannot be interrupted using e.g. call_with_time_limit/2.
+This is why we normally read the PEM  file  and only get here if the user
+asks for it or the PEM file is not available.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+static int
+load_system_cacerts_keychain(STACK_OF(X509) *system_certs, bool *ok)
+{ CFArrayRef certs = NULL;
+  CFIndex i, ncerts;
+  int count = 0;
+
+  if ( SecTrustCopyAnchorCertificates(&certs) != errSecSuccess )
+    return -1;
+
+  ssl_deb(1, "loading trust anchors from the keychain\n");
+
+  ncerts = CFArrayGetCount(certs);
+  for(i=0; i<ncerts; i++)
+  { SecCertificateRef cert =
+	 (SecCertificateRef)CFArrayGetValueAtIndex(certs, i);
+    CFDataRef cert_data;
+
+    if ( (cert_data=SecCertificateCopyData(cert)) )
+    { const unsigned char *der = CFDataGetBytePtr(cert_data);
+      X509 *x509 = d2i_X509(NULL, &der, CFDataGetLength(cert_data));
+
+      CFRelease(cert_data);
+      if ( x509 )
+      { if ( sk_X509_push(system_certs, x509) )
+	{ count++;
+	} else
+	{ X509_free(x509);
+	  *ok = PL_resource_error("memory");
+	  break;
+	}
+      } else
+      { ERR_clear_error();
+      }
+    }
+  }
+  CFRelease(certs);
+
+  return count;
+}
+#endif /*HAVE_SECURITY_SECURITY_H*/
+
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Load the system root certificates as   described  by the Prolog flag
+system_cacert_filename.  This is either the  name  of  a file holding
+PEM encoded certificates or `keychain`  to  use  the macOS keychain.
+If the file cannot be read or holds  no certificates we fall back to
+the keychain if we have one and complain otherwise.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+static bool
+load_system_cacerts(STACK_OF(X509) *system_certs)
+{ const char *filename = system_cacert_filename();
+  bool ok = TRUE;
+
+  if ( !filename )
+    filename = SYSTEM_CACERT_FILENAME;
+
+  if ( strcmp(filename, CACERT_KEYCHAIN) == 0 )
+  {
+#ifdef HAVE_SECURITY_SECURITY_H
+    if ( load_system_cacerts_keychain(system_certs, &ok) < 0 && ok )
+      return ssl_cacerts_warning("no_anchors", CACERT_KEYCHAIN);
+    return ok;
+#else
+    return ssl_cacerts_warning("no_keychain", CACERT_KEYCHAIN);
 #endif
+  }
+
+  if ( load_system_cacerts_file(filename, system_certs, &ok) > 0 || !ok )
+    return ok;
+
+#ifdef HAVE_SECURITY_SECURITY_H
+  if ( !ssl_cacerts_warning("keychain_fallback", filename) )
+    return FALSE;
+  if ( load_system_cacerts_keychain(system_certs, &ok) < 0 && ok )
+    return ssl_cacerts_warning("no_anchors", CACERT_KEYCHAIN);
+  return ok;
+#else
+  return ssl_cacerts_warning("no_certificates", filename);
+#endif
+}
+#endif /*!__WINDOWS__*/
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 ssl_system_verify_locations() adds trusted  root   certificates  from OS
@@ -2591,12 +2745,17 @@ dependent locations if cacert_file(system(root_certificates)) is passed.
 
 The code is written after this StackOverflow message
 http://stackoverflow.com/questions/10095676/openssl-reasonable-default-for-trusted-ca-certificates
+
+On macOS we prefer the PEM file  provided  by  the OS (/etc/ssl/cert.pem)
+over SecTrustCopyAnchorCertificates() because the  latter  can block for
+ever in securityd if the keychain is not accessible.  See
+load_system_cacerts_keychain().
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static STACK_OF(X509) *
 ssl_system_verify_locations(void)
 { STACK_OF(X509) *system_certs = sk_X509_new_null();
-  int ok = TRUE;
+  bool ok = TRUE;
 
   if (!system_certs) return NULL;
 
@@ -2612,7 +2771,7 @@ ssl_system_verify_locations(void)
       X509 *cert = d2i_X509(NULL, &ce, (int)pCertCtx->cbCertEncoded);
       if ( cert )
       { if ( !sk_X509_push(system_certs, cert) )
-        { ok = FALSE;
+        { ok = PL_resource_error("memory");
           break;
         }
       }
@@ -2620,60 +2779,15 @@ ssl_system_verify_locations(void)
 
     CertCloseStore(hSystemStore, 0);
   }
-#elif defined(HAVE_SECURITY_SECURITY_H) /* __APPLE__ */
-  CFArrayRef certs = NULL;
-  OSStatus status;
-
-  status = SecTrustCopyAnchorCertificates(&certs);
-  if (status == errSecSuccess)
-  { size_t i, count = CFArrayGetCount(certs);
-
-    for (i = 0; i < count; i++)
-    { const void *cert = CFArrayGetValueAtIndex(certs, i);
-      CFDataRef cert_data = NULL;
-      const unsigned char *der;
-      unsigned long cert_data_length;
-      X509 *x509 = NULL;
-
-      cert_data = SecCertificateCopyData((SecCertificateRef)cert);
-      der = CFDataGetBytePtr(cert_data);
-      cert_data_length = CFDataGetLength(cert_data);
-      x509 = d2i_X509(NULL, &der, cert_data_length);
-      CFRelease(cert_data);
-      if ( x509 )
-      { if ( !sk_X509_push(system_certs, x509) )
-	{ ok = FALSE;
-	  break;
-	}
-      }
-    }
-    CFRelease(certs);
-  }
 #else
-  const char *cacert_filename;
-  if ( (cacert_filename = system_cacert_filename()) )
-  { X509 *cert = NULL;
-    FILE *cafile = fopen(cacert_filename, "rb");
-
-    ssl_deb(1, "cacert_filename = %s\n", cacert_filename);
-
-    if ( cafile != NULL )
-    { while ((cert = PEM_read_X509(cafile, NULL, NULL, NULL)) != NULL)
-      { if ( !sk_X509_push(system_certs, cert) )
-        { ok = FALSE;
-          break;
-        }
-      }
-      fclose(cafile);
-    }
-  }
+  ok = load_system_cacerts(system_certs);
 #endif
 
   if ( ok )
   { return system_certs;
   } else
   { sk_X509_pop_free(system_certs, X509_free);
-    return NULL;                                /* no memory */
+    return NULL;			/* exception pending */
   }
 }
 
@@ -2685,8 +2799,8 @@ system_root_certificates(void)
   pthread_mutex_lock(&root_store_lock);
 #endif
   if ( !system_root_store_fetched )
-  { system_root_store_fetched = TRUE;
-    system_root_store = ssl_system_verify_locations();
+  { if ( (system_root_store=ssl_system_verify_locations()) )
+      system_root_store_fetched = TRUE;	/* else retry; exception pending */
   }
 #ifdef O_PLMT
   pthread_mutex_unlock(&root_store_lock);
@@ -3586,13 +3700,17 @@ static cacert_stack *root_cacert_stack = NULL;
 static int
 add_system_root_certificates(cacert_stack *stack)
 { STACK_OF(X509) *system_certs = system_root_certificates();
+  int index = 0;
 
-  if ( system_certs )
-  { int index = 0;
+  if ( !system_certs )
+    return FALSE;			/* exception pending */
 
-    while( index < sk_X509_num(system_certs) )
-    { sk_X509_push(stack->cacerts,
-		   X509_dup(sk_X509_value(system_certs, index++)));
+  while( index < sk_X509_num(system_certs) )
+  { X509 *cert = X509_dup(sk_X509_value(system_certs, index++));
+
+    if ( !cert || !sk_X509_push(stack->cacerts, cert) )
+    { X509_free(cert);
+      return PL_resource_error("memory");
     }
   }
 
@@ -4135,7 +4253,7 @@ pl_system_root_certificates(term_t list)
   int index = 0;
 
   if ( !(certs=system_root_certificates()) )
-    return PL_unify_nil(list);
+    return FALSE;			/* exception pending */
 
   while (index < sk_X509_num(certs))
   { if ( !(PL_unify_list(tail, head, tail) &&
@@ -4381,6 +4499,7 @@ install_ssl4pl(void)
   MKATOM(tlsv1_3);
   MKATOM(alpn_protocols);
   MKATOM(alpn_protocol_hook);
+  MKATOM(warning);
 
   ATOM_minus                = PL_new_atom("-");
 
